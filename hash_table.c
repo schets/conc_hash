@@ -10,8 +10,12 @@
 #define hash_load 3
 #define is_del 1
 
+#define inc_size 1;
+#define no_inc 0;
 //simple test for 0
 #define test_empty(key) ((key) == 0)
+
+#define test_dead(key) ((key) == 1)
 
 //returns if any bits after the first two exist
 //so returns false for 0, 1, 2
@@ -216,15 +220,26 @@ static uint64_t hash_str64(const char *data, size_t klen) {
 
 static inline item *insert_into(item *elems,
 								uint64_t n_elems,
-						    	uint64_t key) {
+						    	uint64_t key,
+						    	int *res) {
 	uint64_t lkey = key;
+	int nbad = 0;
 	for (size_t i = 0; i < hash_load; i++) {
 		uint64_t act_key = lkey & (n_elems - 1);
 		item *item_at = &elems[act_key];
 		if (test_empty(item_at->key)) {
 			return item_at;
 		}
+		else if (test_dead(item_at->key)) {
+			nbad++;
+		}
 		lkey = avalanche64(lkey);
+	}
+	if (nbad > (hash_load/2)) {
+		*res = no_inc;
+	}
+	else {
+		*res = inc_size;
 	}
 	return 0;
 }
@@ -247,11 +262,13 @@ static inline item *lookup_exist(item *elems,
 	return 0;
 }
 
-static hash_table *resize_into(const hash_table *ht) {
+static hash_table *resize_into(const hash_table *ht, int inc_size) {
 	size_t newer_elements = ht->n_elements;
 	hash_table *ntbl = 0;
 	for (;;) {
-		newer_elements *= 2;
+		//0 if just clearing,
+		//1 if reopening
+		newer_elements <<= inc_size;
 		ntbl = create_ht(newer_elements, ht->n_hazards);
 
 		for (size_t i = 0; i < ht->n_elements; i++) {
@@ -280,8 +297,9 @@ void insert_chars(shared_hash_table *sht, const char *data, size_t klen) {
 	uint64_t keyh = hash_str64(data, klen);
 	item *add_to;
 	hash_table *ht = sht->current_table;
-	while (!(add_to = insert_into(ht->elems, ht->n_elements, keyh))) {
-		ht = resize_into(ht);
+	int ins_res;
+	while (!(add_to = insert_into(ht->elems, ht->n_elements, keyh, &ins_res))) {
+		ht = resize_into(ht, ins_res);
 		update_table(sht, ht);
 	}
 	add_to->data = data + klen;
