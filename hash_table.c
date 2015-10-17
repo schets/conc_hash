@@ -18,7 +18,7 @@
 
 //returns if any bits after the first two exist
 //so returns false for 0, 1, 2
-#define has_elem(key) ((key) & (~3))
+#define has_elem(key) ((key) > 1)
 
 //elements are only inserted by writer, so that's easy
 //elements are removed by storing removal candidates
@@ -36,10 +36,10 @@ typedef struct {
 } hz_st;
 
 typedef struct item {
-	size_t key;
+	uint64_t key;
 	const char *data;
-	size_t dsize; //used for determining cleanup time
 	struct item *next; //not super relevant, useful for cleanup
+	struct item *iter_next; //used for iterating. hence the name
 } item;
 
 
@@ -48,7 +48,8 @@ typedef struct hash_table {
 	uint64_t n_elements;
 	uint64_t active_count;
 	uint64_t n_hazards;
-	struct item *elems;
+	item *elems;
+	item *active_l;
 	item *cleanup_with_me;
 	uint16_t *hazard_start;
 	struct hash_table *next;
@@ -373,7 +374,11 @@ void insert_chars(shared_hash_table *sht, const char *data, size_t klen) {
 		update_table(sht, ht);
 	}
 	add_to->data = data;
-	atomic_store(add_to->key, keyh, mem_release);
+	add_to->key = keyh;
+	add_to->iter_next = ht->active_l;
+	atomic_barrier(mem_release);
+
+	ht->active_l = add_to;
 }
 
 const char *remove_element(struct shared_hash_table *sht, const char *key, size_t klen) {
@@ -407,6 +412,23 @@ char apply_to_elem(struct shared_hash_table *sht,
 	}
 	release_table(sht, id);
 	return 0;
+}
+
+void shared_table_for_each(shared_hash_table *sht,
+						   size_t id,
+						   char (*appfnc)(const char *, void *),
+						   void *params) {
+	hash_table *ctbl = acquire_table(sht, id);
+
+	item *citem = ctbl->active_l;
+	while (citem) {
+		consume_barrier;
+		if (has_elem(citem->key)) {
+			appfnc(citem->data + )
+		}
+		citem = citem->iter_next;
+	}
+	release_table(sht, id);
 }
 
 size_t get_size(shared_hash_table *sht) {

@@ -9,7 +9,7 @@
 #include "hash_table.h"
 
 #define max_size 4096 * 8
-#define nread (100*100*100*100)
+#define nread (100)
 #define nwrite 1000
 #define mod_batch 8
 #define nthread 3
@@ -42,7 +42,6 @@ void dummyfn(const char *a, void *b) {
 void test_lookup(uint64_t cid, size_t id) {
 	keystr *rm = &keys[cid];
 	apply_to_elem(sht,
-		          id,
 		          (char *)rm,
 		          sizeof(uint64_t),
 		          dummyfn,

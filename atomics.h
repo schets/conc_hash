@@ -27,5 +27,6 @@
 
 #define atomic_cas(...) _GET_MACRO(__VA_ARGS__, _atomic_cas4, _atomic_cas3)(__VA_ARGS__)
 
+#define thread_l __thread
 
 #endif
