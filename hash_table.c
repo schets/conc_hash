@@ -5,17 +5,16 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <assert.h>
 
-#define hash_load 3
+#define hash_load 2
 #define is_del 1
 
-#define inc_size 1;
-#define no_inc 0;
+#define _inc_size 1
+#define _no_inc 0
 //simple test for 0
 #define test_empty(key) ((key) == 0)
 
-#define test_dead(key) ((key) == 1)
+#define test_dead(key) ((key) == is_del)
 
 //returns if any bits after the first two exist
 //so returns false for 0, 1, 2
@@ -76,6 +75,8 @@ static size_t calc_ht_size(size_t n_elements, size_t n_hazards) {
 	return sizeof(hash_table) + n_elements * sizeof(item) + sizeof(hz_ct) * n_hazards;
 }
 
+
+
 static void free_htable(hash_table *ht) {
 	//free attached elements
 	item *tofree = ht->cleanup_with_me;
@@ -94,11 +95,26 @@ static hash_table *create_ht(size_t n_el, size_t n_hz) {
 	ht->n_elements = n_el;
 	ht->elems = (item *)ht->actual_data;
 	ht->hazard_start = (hz_ct *)(ht->elems + n_el);
+	ht->n_hazards = n_hz;
 	return ht;
 }
 
+shared_hash_table *create_tbl() {
+	size_t nstart = 128;
+	size_t nhaz = 8;
+	struct shared_hash_table *sht;
+	sht = malloc(sizeof(*sht) + nhaz * sizeof(hz_st));
+	for (size_t i = 0; i < nhaz; i++) {
+		sht->hazard_refs[i].nactive = 0;
+	}
+	sht->current_table = create_ht(nstart, nhaz);
+	sht->old_tables = 0;
+	sht->nhazards = nhaz;
+	atomic_barrier(mem_release);
+	return sht;
+}
+
 static hash_table *acquire_table(shared_hash_table *tbl, size_t id) {
-	assert(id < tbl->nhazards);
 
 	//tbl is assumed to be unchanging ever
 
@@ -113,11 +129,59 @@ static hash_table *acquire_table(shared_hash_table *tbl, size_t id) {
 }
 
 static void release_table(shared_hash_table *tbl, size_t id) {
-	assert(id < tbl->nhazards);
 	//although this is just reading, we must use a release ordering
 	//so that the writer thread doesn't think that we are done
 	//when actually we are still reading
 	atomic_fetch_sub(tbl->hazard_refs[id].nactive, 1, mem_release);
+}
+
+static char update_del(shared_hash_table *tbl, hash_table *htbl) {
+	hz_st *href = tbl->hazard_refs;
+	hz_ct *ohz = htbl->hazard_start;
+	size_t nhz = tbl->nhazards;
+	char del = 1;
+	for (size_t i = 0; i < nhz; i++) {
+		if (ohz[i]) {
+			if (!href[i].nactive) {
+				ohz[i] = 0;
+			}
+			else {
+				del = 0;
+			}
+		}
+	}
+	return del;
+}
+
+void clear_tables(shared_hash_table *sht) {
+	//first pop off the top
+	hash_table *ntop = sht->old_tables;
+	hash_table *ctbl = sht->old_tables;
+	while (ctbl) {
+		hash_table *nxt = ctbl->next;
+		if (update_del(sht, ctbl)) {
+			ntop = nxt;
+			free_htable(ctbl);
+		}
+		ctbl = nxt;
+	}
+	sht->old_tables = ntop;
+
+	//go through the list and clear/update tables left in the middle
+	if (ntop) {
+		hash_table *prev_t = ntop;
+		ctbl = ntop->next;
+		while (ctbl) {
+			hash_table *nxt = ctbl->next;
+			if (update_del(sht, ctbl)) {
+				free_htable(ctbl);
+			}
+			else {
+				prev_t = ctbl;
+			}
+			ctbl = nxt;
+		}
+	}
 }
 
 static void update_table(shared_hash_table *sht, hash_table *ht) {
@@ -136,7 +200,7 @@ static void update_table(shared_hash_table *sht, hash_table *ht) {
 	//from being reordered with the loads from the
 	//current hazard table
 	atomic_barrier(mem_seq_cst);
-
+	printf("New table\n");
 	//once this point is reached, it is impossible for a
 	//reader which has not signed the hazards table yet
 	//to see the older version of the hash table
@@ -155,6 +219,11 @@ static void update_table(shared_hash_table *sht, hash_table *ht) {
 		hasv |= cur; //see if there are any active
 		old->hazard_start[i] = cur;
 	}
+	//try to clear out existing tables
+
+	clear_tables(sht);
+
+	hash_table *prev_t;
 	if (!hasv) {
 		//can delete right away
 		free_htable(old);
@@ -173,7 +242,6 @@ static inline uint64_t rotl64(uint64_t x, int8_t r)
   return (x << r) | (x >> (64 - r));
 }
 
-
 static uint64_t avalanche64(uint64_t h) {
 	h ^= h >> 33;
 	h *= 0xff51afd7ed558ccd;
@@ -185,7 +253,7 @@ static uint64_t avalanche64(uint64_t h) {
 	//that does this and satisfies the pipeline
 	//better. This wil almost certainly not be a
 	//bottleneck though
-	return h <= 2 ? 3 : h;
+	return h < 2 ? 2 : h;
 }
 
 static uint64_t hash_str64(const char *data, size_t klen) {
@@ -197,8 +265,6 @@ static uint64_t hash_str64(const char *data, size_t klen) {
 		return avalanche64(hash);
 	}
 
-	//ensure divisible by 8...
-	assert(!(klen % 8));
 	uint64_t *dat64 = (uint64_t *)data;
 	size_t nblocks = klen / 8;
 
@@ -236,10 +302,10 @@ static inline item *insert_into(item *elems,
 		lkey = avalanche64(lkey);
 	}
 	if (nbad > (hash_load/2)) {
-		*res = no_inc;
+		*res = _no_inc;
 	}
 	else {
-		*res = inc_size;
+		*res = _inc_size;
 	}
 	return 0;
 }
@@ -274,10 +340,12 @@ static hash_table *resize_into(const hash_table *ht, int inc_size) {
 		for (size_t i = 0; i < ht->n_elements; i++) {
 			item *celem = &ht->elems[i];
 			uint64_t rkey = celem->key;
+			int useless;
 			if (has_elem(rkey)) {
 				item *item_at = insert_into(ntbl->elems,
-					newer_elements,
-					rkey);
+											newer_elements,
+											rkey,
+											&useless);
 				if (!item_at) {
 					goto retry;
 				}
@@ -300,9 +368,11 @@ void insert_chars(shared_hash_table *sht, const char *data, size_t klen) {
 	int ins_res;
 	while (!(add_to = insert_into(ht->elems, ht->n_elements, keyh, &ins_res))) {
 		ht = resize_into(ht, ins_res);
+	}
+	if (ht != sht->current_table) {
 		update_table(sht, ht);
 	}
-	add_to->data = data + klen;
+	add_to->data = data;
 	atomic_store(add_to->key, keyh, mem_release);
 }
 
@@ -321,12 +391,12 @@ const char *remove_element(struct shared_hash_table *sht, const char *key, size_
 	return 0;
 }
 
-char apply_elem(struct shared_hash_table *sht,
-				size_t id,
-			    const char *key,
-			    size_t klen,
-			    void (*appfn)(const char *, void *),
-			    void *params) {
+char apply_to_elem(struct shared_hash_table *sht,
+   				   size_t id,
+			       const char *key,
+			       size_t klen,
+			       void (*appfn)(const char *, void *),
+			       void *params) {
 	uint64_t keyh = hash_str64(key, klen);
 	hash_table *ht = acquire_table(sht, id);
 	item *add_to = lookup_exist(ht->elems, ht->n_elements, keyh, key, klen);
@@ -339,3 +409,6 @@ char apply_elem(struct shared_hash_table *sht,
 	return 0;
 }
 
+size_t get_size(shared_hash_table *sht) {
+	return sht->current_table->n_elements;
+}

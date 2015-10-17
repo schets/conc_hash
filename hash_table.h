@@ -13,10 +13,14 @@ struct shared_hash_table;
 void insert_chars(struct shared_hash_table *c, const char *data, size_t klen);
 const char *remove_element(struct shared_hash_table *c, const char *key, size_t klen);
 
-char apply_to_elem(const char *key,
+char apply_to_elem(struct shared_hash_table *sht,
 				   size_t id,
+				   const char *key,
                    size_t klen,
                    void (*appfn)(const char *, void *),
                    void *params);
+
+struct shared_hash_table *create_tbl();
+size_t get_size(struct shared_hash_table *sht);
 
 #endif
