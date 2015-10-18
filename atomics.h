@@ -8,7 +8,6 @@
 #define mem_acq_rel __ATOMIC_ACQ_REL
 #define mem_seq_cst __ATOMIC_SEQ_CST
 
-//we don't support dec alpha
 #define consume_barrier __atomic_signal_fence(mem_acquire)
 #define compiler_barrier __atomic_signal_fence(mem_seq_cst)
 #define atomic_barrier(o) __atomic_thread_fence(o)

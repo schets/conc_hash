@@ -9,10 +9,10 @@
 #include "hash_table.h"
 
 #define max_size 4096 * 8
-#define nread (100)
+#define nread (100*100*100*100)
 #define nwrite 1000
 #define mod_batch 8
-#define nthread 3
+#define nthread 1
 
 char keep_modding;
 typedef struct timespec timespec;
@@ -21,6 +21,10 @@ typedef struct keystr {
     uint64_t keyval;
     uint64_t value;
 } keystr;
+
+int comp_keys(const void *k1, const void* k2) {
+	return (uint64_t)k1 == (uint64_t)k2;
+}
 
 keystr keys[nwrite*2];
 
@@ -31,21 +35,22 @@ uint32_t nextrand(size_t *cur) {
 
 struct shared_hash_table *sht;
 
-void dummyfn(const char *a, void *b) {
-	uint64_t *kmb = (uint64_t *)b;
-	uint64_t *kma = (uint64_t *)a;
-	if (*kma != *kmb) {
-		printf ("Fuck\n");
+void dummyfn(const void *_k, void *_v, void *_par) {
+	uint64_t k = (uint64_t)_k;
+	uint64_t v = (uint64_t)_v;
+	keystr *par = (keystr *)_par;
+	if ((k != par->keyval) || (v != par->value)) {
+//		printf ("Fuck\n");
 	}
 }
 
 void test_lookup(uint64_t cid, size_t id) {
 	keystr *rm = &keys[cid];
 	apply_to_elem(sht,
-		          (char *)rm,
-		          sizeof(uint64_t),
+				  id,
+				  (void *)rm->keyval,
 		          dummyfn,
-		          &rm->value);
+		          rm);
 }
 
 void *read_table(void *val) {
@@ -71,16 +76,16 @@ void init_keys() {
 
 void do_inserts() {
     for (size_t i = 0; i < nwrite; i++) {
-    	insert_chars(sht, (char *)&keys[i], sizeof(uint64_t));	
+    	insert(sht, (void *)keys[i].keyval, (void *)keys[i].value);	
     }
 }
 
 void *modify(void *val) {
 	uint64_t rng = (uint64_t)val;
-	while(keep_modding) {
+	while(__atomic_load_n(&keep_modding, __ATOMIC_RELAXED)) {
 		keystr *rm = &keys[nextrand(&rng) % (nwrite * 2)];
-		if (!remove_element(sht, (char *)rm, sizeof(uint64_t))) {
-			insert_chars(sht, (char *)rm, sizeof(uint64_t));
+		if (!remove_element(sht, (void *)rm->keyval)) {
+			insert(sht, (void *)rm->keyval, (void *)rm->value);
 		}
 	}
 	return 0;
@@ -103,7 +108,7 @@ int main() {
 	keep_modding = 1;
 	pthread_t threads[nthread];
 	pthread_t modt;
-	sht = create_tbl();
+	sht = create_tbl(hash_integer, comp_keys);
 	init_keys();
 	do_inserts();
 	timespec time1, time2, timed;
@@ -116,6 +121,7 @@ int main() {
 	for (size_t i = 0; i < nthread; i++) {
 		pthread_join(threads[i], 0);
 	}
+	printf("\n\nJoining stuff\n");
 	clock_gettime(CLOCK_REALTIME, &time2);
 	keep_modding = 0;
 	pthread_join(modt, NULL);

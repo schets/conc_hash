@@ -2,24 +2,34 @@
 #define TASK_STRUCT_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 //single-writer many-reader hash table;
-//also will support shared interprocess memory
 struct shared_hash_table;
 
 //first klen characters are the key
 //the rest is a null-terminated string
 
-void insert_chars(struct shared_hash_table *c, const char *data, size_t klen);
-const char *remove_element(struct shared_hash_table *c, const char *key, size_t klen);
+typedef uint64_t (*hashfn_type)(const void *);
+typedef int (*compfn_type)(const void*, const void*);
+typedef void (*delfn_type)(const void *, void *, void *);
+
+void insert(struct shared_hash_table *c, const void *key, void *data);
+void *remove_element(struct shared_hash_table *c, const void *key);
 
 char apply_to_elem(struct shared_hash_table *sht,
-				   const char *key,
-                   size_t klen,
-                   void (*appfn)(const char *, void *),
+			       size_t id,
+				   const void *key,
+                   void (*appfn)(const void *, void *, void *),
                    void *params);
 
-struct shared_hash_table *create_tbl();
+struct shared_hash_table *create_tbl(hashfn_type h, compfn_type c);
 size_t get_size(struct shared_hash_table *sht);
+
+uint64_t hash_string(const void* elem);
+
+//!hashes the value in the pointer!!!!!!
+//not the pointer itself
+uint64_t hash_integer(const void* elem);
 
 #endif

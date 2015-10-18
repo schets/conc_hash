@@ -11,6 +11,7 @@
 
 #define _inc_size 1
 #define _no_inc 0
+#define _exists 2
 //simple test for 0
 #define test_empty(key) ((key) == 0)
 
@@ -37,12 +38,11 @@ typedef struct {
 
 typedef struct item {
 	uint64_t key;
-	const char *data;
+	const void *keyp;
+	void *data;
 	struct item *next; //not super relevant, useful for cleanup
 	struct item *iter_next; //used for iterating. hence the name
 } item;
-
-
 
 typedef struct hash_table {
 	uint64_t n_elements;
@@ -53,7 +53,6 @@ typedef struct hash_table {
 	item *cleanup_with_me;
 	uint16_t *hazard_start;
 	struct hash_table *next;
-	int fd;
 	char actual_data[];
 } hash_table;
 
@@ -61,6 +60,8 @@ typedef struct shared_hash_table {
 	struct hash_table *current_table;
 	struct hash_table *old_tables;
 	size_t nhazards;
+	hashfn_type hashfn;
+	compfn_type compfn;
 	hz_st hazard_refs[];
 } shared_hash_table;
 
@@ -76,14 +77,12 @@ static size_t calc_ht_size(size_t n_elements, size_t n_hazards) {
 	return sizeof(hash_table) + n_elements * sizeof(item) + sizeof(hz_ct) * n_hazards;
 }
 
-
-
 static void free_htable(hash_table *ht) {
 	//free attached elements
 	item *tofree = ht->cleanup_with_me;
 	while (tofree) {
 		//const qualifier...
-		free_mem((void *)tofree->data);
+		//free_mem((void *)tofree->data);
 		tofree = tofree->next;
 	}
 	free_mem(ht);
@@ -100,17 +99,20 @@ static hash_table *create_ht(size_t n_el, size_t n_hz) {
 	return ht;
 }
 
-shared_hash_table *create_tbl() {
+shared_hash_table *create_tbl(hashfn_type hashfn, compfn_type compfn) {
 	size_t nstart = 128;
 	size_t nhaz = 8;
 	struct shared_hash_table *sht;
 	sht = malloc(sizeof(*sht) + nhaz * sizeof(hz_st));
+	memset(sht, 0, sizeof(*sht));
 	for (size_t i = 0; i < nhaz; i++) {
 		sht->hazard_refs[i].nactive = 0;
 	}
 	sht->current_table = create_ht(nstart, nhaz);
-	sht->old_tables = 0;
 	sht->nhazards = nhaz;
+	sht->hashfn = hashfn;
+	sht->compfn = compfn;
+	sht->old_tables = 0;
 	atomic_barrier(mem_release);
 	return sht;
 }
@@ -144,12 +146,15 @@ static char update_del(shared_hash_table *tbl, hash_table *htbl) {
 	for (size_t i = 0; i < nhz; i++) {
 		if (ohz[i]) {
 			if (!href[i].nactive) {
+				atomic_barrier(mem_acquire);
 				ohz[i] = 0;
 			}
 			else {
 				del = 0;
 			}
 		}
+	}
+	if (del) {
 	}
 	return del;
 }
@@ -161,10 +166,13 @@ void clear_tables(shared_hash_table *sht) {
 	while (ctbl) {
 		hash_table *nxt = ctbl->next;
 		if (update_del(sht, ctbl)) {
-			ntop = nxt;
 			free_htable(ctbl);
+			ntop = nxt;
+			ctbl = nxt;
 		}
-		ctbl = nxt;
+		else {
+			break;
+		}
 	}
 	sht->old_tables = ntop;
 
@@ -176,6 +184,7 @@ void clear_tables(shared_hash_table *sht) {
 			hash_table *nxt = ctbl->next;
 			if (update_del(sht, ctbl)) {
 				free_htable(ctbl);
+				prev_t->next = nxt;
 			}
 			else {
 				prev_t = ctbl;
@@ -201,7 +210,6 @@ static void update_table(shared_hash_table *sht, hash_table *ht) {
 	//from being reordered with the loads from the
 	//current hazard table
 	atomic_barrier(mem_seq_cst);
-	printf("New table\n");
 	//once this point is reached, it is impossible for a
 	//reader which has not signed the hazards table yet
 	//to see the older version of the hash table
@@ -224,9 +232,7 @@ static void update_table(shared_hash_table *sht, hash_table *ht) {
 
 	clear_tables(sht);
 
-	hash_table *prev_t;
 	if (!hasv) {
-		//can delete right away
 		free_htable(old);
 	}
 	else {
@@ -257,40 +263,15 @@ static uint64_t avalanche64(uint64_t h) {
 	return h < 2 ? 2 : h;
 }
 
-static uint64_t hash_str64(const char *data, size_t klen) {
-	//all keys end up being multiples of 8 bytes,
-	//for a simpler version of this algorithm
-	//the rest zero padded
-	uint64_t hash = *(uint64_t *)data;
-	if (klen <= 8) {
-		return avalanche64(hash);
-	}
-
-	uint64_t *dat64 = (uint64_t *)data;
-	size_t nblocks = klen / 8;
-
-	const uint64_t c1 = 0x87c37b91114253d5;
-	const uint64_t c2 = 0x4cf5ad432745937f;
-
-	//do the actual hash
-	for (size_t i = 0; i < nblocks; i++) {
-		uint64_t k = dat64[i];
-		k *= c1;
-		k = rotl64(k, 31);
-		k *= c2;
-		hash ^= k;
-		hash = rotl64(hash, 27);
-		hash = hash*5+0x52dce729;
-	}
-	return avalanche64(hash ^ klen);
-}
-
 static inline item *insert_into(item *elems,
 								uint64_t n_elems,
 						    	uint64_t key,
+						    	const void *keyp,
+						    	compfn_type cmp,
 						    	int *res) {
 	uint64_t lkey = key;
 	int nbad = 0;
+	*res = _inc_size;
 	for (size_t i = 0; i < hash_load; i++) {
 		uint64_t act_key = lkey & (n_elems - 1);
 		item *item_at = &elems[act_key];
@@ -298,30 +279,28 @@ static inline item *insert_into(item *elems,
 			return item_at;
 		}
 		else if (test_dead(item_at->key)) {
-			nbad++;
+			*res = _no_inc;
+		}
+		else if (cmp && cmp(item_at->keyp, keyp)) {
+			*res = _exists;
+			return 0;
 		}
 		lkey = avalanche64(lkey);
-	}
-	if (nbad > (hash_load/2)) {
-		*res = _no_inc;
-	}
-	else {
-		*res = _inc_size;
 	}
 	return 0;
 }
 
 static inline item *lookup_exist(item *elems,
-								uint64_t n_elems,
-						    	uint64_t key,
-						    	const char *ks,
-						    	size_t klen) {
-	uint64_t lkey = key;
+							     uint64_t n_elems,
+							     uint64_t keyh,
+							     const void *key,
+							     compfn_type cmp) {
+	uint64_t lkey = keyh;
 	for (size_t i = 0; i < hash_load; i++) {
 		uint64_t act_key = lkey & (n_elems - 1);
 		item *item_at = &elems[act_key];
 		if (has_elem(item_at->key)
-			&& !memcmp(item_at->data, ks, klen)) {
+			&& cmp(item_at->keyp, key)) {
 			return item_at;
 		}
 		lkey = avalanche64(lkey);
@@ -332,28 +311,37 @@ static inline item *lookup_exist(item *elems,
 static hash_table *resize_into(const hash_table *ht, int inc_size) {
 	size_t newer_elements = ht->n_elements;
 	hash_table *ntbl = 0;
+	if (inc_size == _no_inc) {
+	}
+	else {
+	}
 	for (;;) {
 		//0 if just clearing,
 		//1 if reopening
 		newer_elements <<= inc_size;
 		ntbl = create_ht(newer_elements, ht->n_hazards);
-
-		for (size_t i = 0; i < ht->n_elements; i++) {
-			item *celem = &ht->elems[i];
-			uint64_t rkey = celem->key;
-			int useless;
-			if (has_elem(rkey)) {
+		item *celem = ht->active_l;
+		while (celem) {
+			if (has_elem(celem->key)) {
+				uint64_t rkey = celem->key;
+				int useless;
 				item *item_at = insert_into(ntbl->elems,
 											newer_elements,
 											rkey,
+											NULL,
+											NULL,
 											&useless);
 				if (!item_at) {
 					goto retry;
 				}
 
-				item_at->key = rkey;
+				item_at->key = celem->key;
 				item_at->data = celem->data;
+				item_at->keyp = celem->keyp;
+				item_at->iter_next = ntbl->active_l;
+				ntbl->active_l = item_at;
 			}
+			celem = celem->next;
 		}
 		break;
 		retry:
@@ -362,12 +350,13 @@ static hash_table *resize_into(const hash_table *ht, int inc_size) {
 	return ntbl;
 }
 
-void insert_chars(shared_hash_table *sht, const char *data, size_t klen) {
-	uint64_t keyh = hash_str64(data, klen);
+void insert(shared_hash_table *sht, const void *key, void *data) {
+	uint64_t keyh = sht->hashfn(key);
 	item *add_to;
 	hash_table *ht = sht->current_table;
 	int ins_res;
-	while (!(add_to = insert_into(ht->elems, ht->n_elements, keyh, &ins_res))) {
+	while (!(add_to = insert_into(ht->elems, ht->n_elements, keyh,
+							      key, sht->compfn, &ins_res))) {
 		ht = resize_into(ht, ins_res);
 	}
 	if (ht != sht->current_table) {
@@ -375,16 +364,17 @@ void insert_chars(shared_hash_table *sht, const char *data, size_t klen) {
 	}
 	add_to->data = data;
 	add_to->key = keyh;
+	add_to->keyp = key;
 	add_to->iter_next = ht->active_l;
 	atomic_barrier(mem_release);
 
 	ht->active_l = add_to;
 }
 
-const char *remove_element(struct shared_hash_table *sht, const char *key, size_t klen) {
-	uint64_t keyh = hash_str64(key, klen);
+void *remove_element(struct shared_hash_table *sht, const void *key) {
 	hash_table *ht = sht->current_table;
-	item *add_to = lookup_exist(ht->elems, ht->n_elements, keyh, key, klen);
+	uint64_t keyh = sht->hashfn(key);
+	item *add_to = lookup_exist(ht->elems, ht->n_elements, keyh, key, sht->compfn);
 	if (add_to) {
 		//no synchronization here,
 		//doesn't matter if someone is looking/looks this up
@@ -398,15 +388,15 @@ const char *remove_element(struct shared_hash_table *sht, const char *key, size_
 
 char apply_to_elem(struct shared_hash_table *sht,
    				   size_t id,
-			       const char *key,
-			       size_t klen,
-			       void (*appfn)(const char *, void *),
+			       const void *key,
+			       void (*appfn)(const void *, void *, void *),
 			       void *params) {
-	uint64_t keyh = hash_str64(key, klen);
+	uint64_t keyh = sht->hashfn(key);
 	hash_table *ht = acquire_table(sht, id);
-	item *add_to = lookup_exist(ht->elems, ht->n_elements, keyh, key, klen);
+	item *add_to = lookup_exist(ht->elems, ht->n_elements, keyh, key, sht->compfn);
 	if (add_to) {
-		appfn(add_to->data + klen, params);
+		atomic_barrier(mem_acquire);
+		appfn(add_to->keyp, add_to->data, params);
 		release_table(sht, id);
 		return 1;
 	}
@@ -416,7 +406,7 @@ char apply_to_elem(struct shared_hash_table *sht,
 
 void shared_table_for_each(shared_hash_table *sht,
 						   size_t id,
-						   char (*appfnc)(const char *, void *),
+						   char (*appfnc)(const void*, const void *, void *),
 						   void *params) {
 	hash_table *ctbl = acquire_table(sht, id);
 
@@ -424,7 +414,10 @@ void shared_table_for_each(shared_hash_table *sht,
 	while (citem) {
 		consume_barrier;
 		if (has_elem(citem->key)) {
-			appfnc(citem->data + )
+			//need an acquire barrier here since we are synchronizing
+			//with stores to key, not just loads of citem
+			atomic_barrier(mem_acquire);
+			appfnc(citem->keyp, citem->data, params);
 		}
 		citem = citem->iter_next;
 	}
@@ -433,4 +426,22 @@ void shared_table_for_each(shared_hash_table *sht,
 
 size_t get_size(shared_hash_table *sht) {
 	return sht->current_table->n_elements;
+}
+
+
+uint64_t hash_string(const void *_instr) {
+	uint64_t hash = 0xcbf29ce484222325;
+	if (_instr) {
+		const unsigned char* instr = (const unsigned char *)_instr;
+		while (*instr) {
+			hash ^= *instr;
+			hash *= 0x100000001b3;
+			instr++;
+		}
+	}
+	return avalanche64(hash);
+}
+
+uint64_t hash_integer(const void *in) {
+	return avalanche64((uint64_t)in);
 }
