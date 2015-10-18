@@ -12,7 +12,7 @@
 #define nread (100*100*100*100)
 #define nwrite 1000
 #define mod_batch 8
-#define nthread 1
+#define nthread 3
 
 char keep_modding;
 typedef struct timespec timespec;

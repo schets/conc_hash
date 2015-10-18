@@ -243,6 +243,16 @@ static void update_table(shared_hash_table *sht, hash_table *ht) {
 	}
 }
 
+void try_clean_mem(shared_hash_table *sh) {
+	clear_tables(sh);
+}
+
+void clean_all_mem(shared_hash_table *sh) {
+	while (sh->old_tables) {
+		clear_tables(sh);
+	}
+}
+
 //thanks internet
 static inline uint64_t rotl64(uint64_t x, int8_t r)
 {

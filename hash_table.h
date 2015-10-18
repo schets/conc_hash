@@ -32,4 +32,6 @@ uint64_t hash_string(const void* elem);
 //not the pointer itself
 uint64_t hash_integer(const void* elem);
 
+void try_clean_mem(struct shared_hash_table *sht);
+
 #endif
