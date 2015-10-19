@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include <unistd.h>
 
@@ -21,6 +22,12 @@ typedef struct keystr {
     uint64_t keyval;
     uint64_t value;
 } keystr;
+
+long myclock() {
+      struct timeval tv;
+      gettimeofday(&tv, NULL);
+      return (tv.tv_sec * 1000000) + tv.tv_usec;
+}
 
 int comp_keys(const void *k1, const void* k2) {
 	return (uint64_t)k1 == (uint64_t)k2;
@@ -76,7 +83,7 @@ void init_keys() {
 
 void do_inserts() {
     for (size_t i = 0; i < nwrite; i++) {
-    	insert(sht, (void *)keys[i].keyval, (void *)keys[i].value);	
+    	insert(sht, (void *)keys[i].keyval, (void *)keys[i].value);
     }
 }
 
@@ -111,8 +118,7 @@ int main() {
 	sht = create_tbl(hash_integer, comp_keys);
 	init_keys();
 	do_inserts();
-	timespec time1, time2, timed;
-	clock_gettime(CLOCK_REALTIME, &time1);
+	long ts = myclock();
 	keep_modding = 1;
 	pthread_create(&modt, NULL, modify, (void *)time(NULL));
 	for (size_t i = 0; i < nthread; i++) {
@@ -122,11 +128,10 @@ int main() {
 		pthread_join(threads[i], 0);
 	}
 	printf("\n\nJoining stuff\n");
-	clock_gettime(CLOCK_REALTIME, &time2);
+	ts = myclock() - ts;
 	keep_modding = 0;
 	pthread_join(modt, NULL);
-	timed = diff(time1, time2);
-	uint64_t total_nanos = timed.tv_nsec + 1e9*timed.tv_sec;
+	uint64_t total_nanos = ts * 1000;
 	double seconds = total_nanos * (1.0/1e9);
 
 	printf("Took %f seconds\n", seconds);
