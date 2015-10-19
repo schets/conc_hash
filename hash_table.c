@@ -30,6 +30,24 @@
 typedef char buffer[128];
 typedef uint16_t hz_ct;
 
+typedef enum message_type {
+	add_item,
+	remove_item
+} message_type;
+
+typedef struct message {
+	const void *key;
+	void *value;
+	struct message *next;
+	int message_type;
+} message;
+
+typedef struct message_queue {
+	buffer _back;
+	buffer _front;
+	char data[];
+} message_queue;
+
 typedef struct {
 	buffer back;
 	hz_ct nactive;
@@ -60,6 +78,7 @@ typedef struct shared_hash_table {
 	struct hash_table *current_table;
 	struct hash_table *old_tables;
 	size_t nhazards;
+	size_t access;
 	hashfn_type hashfn;
 	compfn_type compfn;
 	hz_st hazard_refs[];
@@ -427,7 +446,9 @@ void shared_table_for_each(shared_hash_table *sht,
 			//need an acquire barrier here since we are synchronizing
 			//with stores to key, not just loads of citem
 			atomic_barrier(mem_acquire);
-			appfnc(citem->keyp, citem->data, params);
+			if (!appfnc(citem->keyp, citem->data, params)) {
+				break;
+			}
 		}
 		citem = citem->iter_next;
 	}
