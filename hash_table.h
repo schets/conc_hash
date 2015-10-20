@@ -1,5 +1,5 @@
-#ifndef TASK_STRUCT_H
-#define TASK_STRUCT_H
+#ifndef SHARED_HASH_TABLE_H
+#define SHARED_HASH_TABLE_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -28,8 +28,7 @@ size_t get_size(struct shared_hash_table *sht);
 
 uint64_t hash_string(const void* elem);
 
-//!hashes the value in the pointer!!!!!!
-//not the pointer itself
+//!hashes the value in the pointer
 uint64_t hash_integer(const void* elem);
 
 void try_clean_mem(struct shared_hash_table *sht);

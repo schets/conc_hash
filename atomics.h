@@ -18,6 +18,7 @@
 #define atomic_fetch_add(n, v, o) __atomic_fetch_add(&(n), v, o)
 #define atomic_fetch_sub(n, v, o) __atomic_fetch_sub(&(n), v, o)
 
+#define atomic_exchange(n, v, o) __atomic_exchange_n(&(n), v, o)
 //ewwwwww
 #define _GET_MACRO(_1,_2,_3,_4,NAME,...) NAME
 

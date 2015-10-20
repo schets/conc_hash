@@ -35,7 +35,7 @@ int comp_keys(const void *k1, const void* k2) {
 
 keystr keys[nwrite*2];
 
-uint32_t nextrand(size_t *cur) {
+uint32_t nextrand(uint64_t *cur) {
     *cur = (*cur * 2862933555777941757) + 3037000493;
     return *cur >> 32;
 }
@@ -137,6 +137,7 @@ int main() {
 	printf("Took %f seconds\n", seconds);
 	printf("Took %f nanoseconds per lookup\n", 1e9*seconds/nread);
 	printf("Performed %e reads per second\n", nthread*nread/seconds);
+	printf("Performed %e reads per second per thread\n", nread/seconds);
 	printf("Final hash table held %d elements total", get_size(sht));
 	return 0;
 }

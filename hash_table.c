@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+#define mcache_size 16
+
 #define hash_load 2
 #define is_del 1
 
@@ -39,14 +41,27 @@ typedef struct message {
 	const void *key;
 	void *value;
 	struct message *next;
-	int message_type;
+	struct message_queue *fromwhich;
+	message_type mtype;
+	int flags;
 } message;
 
 typedef struct message_queue {
 	buffer _back;
+
+	message *head;
+
+	buffer tailb;
+	message *tail;
+
+	buffer _shared;
+	message mcache[mcache_size + 1];
 	buffer _front;
-	char data[];
 } message_queue;
+
+thread_l message_queue local_mess_queue;
+
+
 
 typedef struct {
 	buffer back;
@@ -75,14 +90,83 @@ typedef struct hash_table {
 } hash_table;
 
 typedef struct shared_hash_table {
+	buffer _back;
+
+	message *meshead;
+
+    buffer wdata;
+
+    message *tail;
 	struct hash_table *current_table;
 	struct hash_table *old_tables;
 	size_t nhazards;
 	size_t access;
 	hashfn_type hashfn;
 	compfn_type compfn;
+
+	buffer _hrefs;
 	hz_st hazard_refs[];
 } shared_hash_table;
+
+static void put_to_queue(message_queue *q, message *m) {
+	m->next = 0;
+	message *oldhead = atomic_exchange(q->head, m, mem_release);
+	//the release store on this removes the need for an acquire
+	//on the exchange.
+	atomic_store(oldhead->next, m, mem_release);
+}
+
+static message *get_from_queue(message_queue *q) {
+	message *ctail = q->tail;
+	consume_barrier;
+	message *nxt = ctail->next;
+	if (nxt) {
+		q->tail = nxt;
+		ctail->fromwhich = q;
+		return ctail;
+	}
+	return 0;
+}
+
+static message *get_message() {
+	message *res = get_from_queue(&local_mess_queue);
+	if (res) {
+		return res;
+	}
+	res = (message *)malloc(sizeof(*res));
+	res->fromwhich = 0;
+	return res;
+}
+
+static void return_message(message *mess) {
+	if (mess->fromwhich) {
+		put_to_queue(mess->fromwhich, mess);
+	}
+	else {
+		free(mess);
+	}
+}
+
+static void insert_message(shared_hash_table *sht, message *m) {
+
+}
+
+
+static void remove_message(shared_hash_table *sht, message *m) {
+
+}
+
+static void handle_message(shared_hash_table *sht, message *m) {
+	switch (m->mtype) {
+	case add_item:
+		insert_message(sht, m);
+	case remove_item:
+		remove_message(sht, m);
+	default:
+		break;
+	}
+}
+
 
 static void *alloc_mem(size_t s) {
 	return malloc(s);
@@ -134,6 +218,17 @@ shared_hash_table *create_tbl(hashfn_type hashfn, compfn_type compfn) {
 	sht->old_tables = 0;
 	atomic_barrier(mem_release);
 	return sht;
+}
+
+static char acquire_write(shared_hash_table *sht) {
+	if (sht->access == 0) {
+		return atomic_exchange(sht->access, 1, mem_acquire);
+	}
+	return 1;
+}
+
+static void release_write(shared_hash_table *sht) {
+	atomic_store(sht->access, 0, mem_release);
 }
 
 static hash_table *acquire_table(shared_hash_table *tbl, size_t id) {
