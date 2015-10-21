@@ -1,7 +1,7 @@
 #ifndef ATOMICS_H
 #define ATOMICS_H
 
-//define our own atomics, don't rely on C11
+//define our own atomics, don't rely on C11 - goes farther back
 #define mem_relaxed __ATOMIC_RELAXED
 #define mem_acquire __ATOMIC_ACQUIRE
 #define mem_release __ATOMIC_RELEASE

@@ -13,7 +13,7 @@
 #define nread (100*100*100*100)
 #define nwrite 1000
 #define mod_batch 8
-#define nthread 3
+#define nthread 1
 
 char keep_modding;
 typedef struct timespec timespec;
@@ -22,6 +22,8 @@ typedef struct keystr {
     uint64_t keyval;
     uint64_t value;
 } keystr;
+
+size_t writect;
 
 long myclock() {
       struct timeval tv;
@@ -90,6 +92,7 @@ void do_inserts() {
 void *modify(void *val) {
 	uint64_t rng = (uint64_t)val;
 	while(__atomic_load_n(&keep_modding, __ATOMIC_RELAXED)) {
+		++writect;
 		keystr *rm = &keys[nextrand(&rng) % (nwrite * 2)];
 		if (!remove_element(sht, (void *)rm->keyval)) {
 			insert(sht, (void *)rm->keyval, (void *)rm->value);
@@ -113,6 +116,7 @@ timespec diff(timespec start, timespec end) {
 int main() {
 	//initialize things
 	keep_modding = 1;
+	writect = 0;
 	pthread_t threads[nthread];
 	pthread_t modt;
 	sht = create_tbl(hash_integer, comp_keys);
@@ -138,6 +142,8 @@ int main() {
 	printf("Took %f nanoseconds per lookup\n", 1e9*seconds/nread);
 	printf("Performed %e reads per second\n", nthread*nread/seconds);
 	printf("Performed %e reads per second per thread\n", nread/seconds);
-	printf("Final hash table held %d elements total", get_size(sht));
+	printf("Performed %ld writes, %e writes/second\nTook %f nanoseconds/write\n",
+		   writect, writect*1.0/seconds, 1e9*seconds/writect);
+	printf("Final hash table held %d elements total\n", get_size(sht));
 	return 0;
 }

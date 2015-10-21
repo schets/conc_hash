@@ -7,6 +7,7 @@
 #include <stdlib.h>
 
 #define mcache_size 16
+#define no_free ((struct message_queue *)1)
 
 #define hash_load 2
 #define is_del 1
@@ -43,7 +44,6 @@ typedef struct message {
 	struct message *next;
 	struct message_queue *fromwhich;
 	message_type mtype;
-	int flags;
 } message;
 
 typedef struct message_queue {
@@ -139,32 +139,15 @@ static message *get_message() {
 }
 
 static void return_message(message *mess) {
-	if (mess->fromwhich) {
-		put_to_queue(mess->fromwhich, mess);
-	}
-	else {
+	switch (mess->fromwhich) {
+	case 0:
 		free(mess);
-	}
-}
-
-static void insert_message(shared_hash_table *sht, message *m) {
-
-}
-
-
-static void remove_message(shared_hash_table *sht, message *m) {
-
-}
-
-static void handle_message(shared_hash_table *sht, message *m) {
-	switch (m->mtype) {
-	case add_item:
-		insert_message(sht, m);
-	case remove_item:
-		remove_message(sht, m);
-	default:
 		break;
-	}
+	case no_free:
+	    break;
+	default:
+		put_to_queue(mess->fromwhich, mess);
+	};
 }
 
 
@@ -548,6 +531,32 @@ void shared_table_for_each(shared_hash_table *sht,
 		citem = citem->iter_next;
 	}
 	release_table(sht, id);
+}
+
+/****
+* message handling
+*/ 
+
+
+
+static void insert_message(shared_hash_table *sht, message *m) {
+    insert(sht, m->key, m->data);	
+}
+
+
+static void remove_message(shared_hash_table *sht, message *m) {
+	m->data = remove_element(sht, m->key);
+}
+
+static void handle_message(shared_hash_table *sht, message *m) {
+	switch (m->mtype) {
+	case add_item:
+		insert_message(sht, m);
+	case remove_item:
+		remove_message(sht, m);
+	default:
+		break;
+	}
 }
 
 size_t get_size(shared_hash_table *sht) {
