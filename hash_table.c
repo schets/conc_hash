@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <limits.h>
 
 #define mcache_size 16
 #define no_free ((struct message_queue *)1)
@@ -40,7 +41,7 @@ typedef enum message_type {
 
 typedef struct message {
 	const void *key;
-	void *value;
+	void *data;
 	struct message *next;
 	struct message_queue *fromwhich;
 	message_type mtype;
@@ -55,11 +56,12 @@ typedef struct message_queue {
 	message *tail;
 
 	buffer _shared;
-	message mcache[mcache_size + 1];
+	size_t num_held;
 	buffer _front;
 } message_queue;
 
-thread_l message_queue local_mess_queue;
+static thread_l message_queue local_mess_queue;
+static thread_l message_queue *local_queue = 0;
 
 
 
@@ -92,11 +94,11 @@ typedef struct hash_table {
 typedef struct shared_hash_table {
 	buffer _back;
 
-	message *meshead;
+	message *mhead;
 
     buffer wdata;
 
-    message *tail;
+    message *mtail;
 	struct hash_table *current_table;
 	struct hash_table *old_tables;
 	size_t nhazards;
@@ -108,29 +110,34 @@ typedef struct shared_hash_table {
 	hz_st hazard_refs[];
 } shared_hash_table;
 
-static void put_to_queue(message_queue *q, message *m) {
+
+static void put_to_queue(message **qhead, message *m) {
 	m->next = 0;
-	message *oldhead = atomic_exchange(q->head, m, mem_release);
+	message *oldhead = atomic_exchange(*qhead, m, mem_release);
 	//the release store on this removes the need for an acquire
 	//on the exchange.
 	atomic_store(oldhead->next, m, mem_release);
 }
 
-static message *get_from_queue(message_queue *q) {
-	message *ctail = q->tail;
+static message *get_from_queue(message **qtail) {
+	message *ctail = *qtail;
 	consume_barrier;
 	message *nxt = ctail->next;
 	if (nxt) {
-		q->tail = nxt;
-		ctail->fromwhich = q;
+		*qtail = nxt;
 		return ctail;
 	}
 	return 0;
 }
 
 static message *get_message() {
-	message *res = get_from_queue(&local_mess_queue);
+	message_queue *lq = local_queue;
+	if (lq == 0) {
+		local_queue = lq = &local_mess_queue;
+	}
+	message *res = get_from_queue(&lq->tail);
 	if (res) {
+		res->fromwhich = lq;
 		return res;
 	}
 	res = (message *)malloc(sizeof(*res));
@@ -139,17 +146,15 @@ static message *get_message() {
 }
 
 static void return_message(message *mess) {
-	switch (mess->fromwhich) {
-	case 0:
+	if (mess->fromwhich) {
+		if (mess->fromwhich != no_free) {
+			put_to_queue(&mess->fromwhich->head, mess);
+		}
+	}
+	else {
 		free(mess);
-		break;
-	case no_free:
-	    break;
-	default:
-		put_to_queue(mess->fromwhich, mess);
-	};
+	}
 }
-
 
 static void *alloc_mem(size_t s) {
 	return malloc(s);
@@ -457,7 +462,7 @@ static hash_table *resize_into(const hash_table *ht, int inc_size) {
 	return ntbl;
 }
 
-void insert(shared_hash_table *sht, const void *key, void *data) {
+void _insert(shared_hash_table *sht, const void *key, void *data) {
 	uint64_t keyh = sht->hashfn(key);
 	item *add_to;
 	hash_table *ht = sht->current_table;
@@ -478,7 +483,7 @@ void insert(shared_hash_table *sht, const void *key, void *data) {
 	ht->active_l = add_to;
 }
 
-void *remove_element(struct shared_hash_table *sht, const void *key) {
+void *_remove_element(struct shared_hash_table *sht, const void *key) {
 	hash_table *ht = sht->current_table;
 	uint64_t keyh = sht->hashfn(key);
 	item *add_to = lookup_exist(ht->elems, ht->n_elements, keyh, key, sht->compfn);
@@ -537,8 +542,6 @@ void shared_table_for_each(shared_hash_table *sht,
 * message handling
 */ 
 
-
-
 static void insert_message(shared_hash_table *sht, message *m) {
     insert(sht, m->key, m->data);	
 }
@@ -557,6 +560,32 @@ static void handle_message(shared_hash_table *sht, message *m) {
 	default:
 		break;
 	}
+}
+
+static void deal_with_messages(shared_hash_table *sht, int num_m) {
+	if (num_m < 0) {
+		num_m = INT_MAX;
+	}
+
+	message *curm = sht->mtail;
+	consume_barrier;
+	//CONTINUE_HERE
+	for (size_t i = 0; i < num_m; i++) {
+
+	}
+}
+
+void *remove_element(shared_hash_table *sht, const void *key) {
+	while (!acquire_write(sht)) {} //simple for now
+	void *rval = _remove_element(sht, key);
+	release_write(sht);
+	return rval;
+}
+
+void insert(shared_hash_table *sht, const void *key, void *data) {
+	while (!acquire_write(sht)) {} //simple for now
+	_insert(sht, key, data);
+	release_write(sht);
 }
 
 size_t get_size(shared_hash_table *sht) {
