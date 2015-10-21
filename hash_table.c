@@ -62,7 +62,10 @@ typedef struct message_queue {
 	buffer tailb;
 	message *tail;
 
-	buffer _shared;
+	buffer refc;
+	size_t num_refs;
+
+	buffer _held;
 	size_t num_held;
 	buffer _front;
 } message_queue;
@@ -139,12 +142,15 @@ static uint64_t avalanche64(uint64_t h, uint64_t salt) {
 	return h < 2 ? 2 : h;
 }
 
+
+
 static void put_to_queue(message **qhead, message *m) {
 	m->next = 0;
 	message *oldhead = atomic_exchange(*qhead, m, mem_release);
 	//the release store on this removes the need for an acquire
 	//on the exchange.
 	atomic_store(oldhead->next, m, mem_release);
+
 }
 
 static message *get_from_queue(message **qtail) {
@@ -158,10 +164,35 @@ static message *get_from_queue(message **qtail) {
 	return 0;
 }
 
+static void init_queue(message_queue *q) {
+	q->tail = malloc(sizeof(*q->tail));
+	q->tail->next = 0;
+	q->head = q->tail;
+	q->num_held = 1;
+	q->num_refs = 1;
+	atomic_barrier(mem_release);
+}
+
+static void del_queue(message_queue *q) {
+	message *ctail;
+	while ((ctail = get_from_queue(&q->tail))) {
+		free(ctail);
+	}
+}
+
+static void rm_q_ref(message_queue *q) {
+	//means that we are the last visitor with the one and all!
+	if (atomic_fetch_sub(q->num_refs, 1, mem_release) == 1) {
+		del_queue(q);
+		free(q);
+	}
+}
+
 static message *get_message() {
 	message_queue *lq = local_queue;
 	if (lq == 0) {
-		local_queue = lq = &local_mess_queue;
+		local_queue = lq = malloc(sizeof(*lq));
+		init_queue(lq);
 	}
 	message *res = get_from_queue(&lq->tail);
 	if (res) {
@@ -176,7 +207,10 @@ static message *get_message() {
 static void return_message(message *mess) {
 	if (mess->fromwhich) {
 		if (mess->fromwhich != no_free) {
-			put_to_queue(&mess->fromwhich->head, mess);
+			if (mess->fromwhich->num_held < mcache_size) {
+				put_to_queue(&mess->fromwhich->head, mess);
+				atomic_fetch_add(mess->fromwhich->num_held, 1, mem_relaxed);
+			}
 		}
 	}
 	else {
