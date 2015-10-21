@@ -13,7 +13,7 @@
 #define nread (100*100*100*100)
 #define nwrite 1000
 #define mod_batch 8
-#define nthread 1
+#define nthread 3
 
 char keep_modding;
 typedef struct timespec timespec;
@@ -49,7 +49,7 @@ void dummyfn(const void *_k, void *_v, void *_par) {
 	uint64_t v = (uint64_t)_v;
 	keystr *par = (keystr *)_par;
 	if ((k != par->keyval) || (v != par->value)) {
-//		printf ("Fuck\n");
+		printf ("Fuck\n");
 	}
 }
 
@@ -89,6 +89,25 @@ void do_inserts() {
     }
 }
 
+void test_exists(const void *k, void *v, void *bres) {
+	*(char *)bres = 1;
+}
+
+void test_real() {
+	char res;
+	for (size_t i = 0; i < nwrite; i++) {
+		res = 0;
+		apply_to_elem(sht,
+					  0,
+					  (const void *)keys[i].keyval,
+					  test_exists,
+					  &res);
+		if (res == 0) {
+			printf("Failed %d\n", (int)i);
+		}
+	}
+}
+
 void *modify(void *val) {
 	uint64_t rng = (uint64_t)val;
 	while(__atomic_load_n(&keep_modding, __ATOMIC_RELAXED)) {
@@ -98,6 +117,7 @@ void *modify(void *val) {
 			insert(sht, (void *)rm->keyval, (void *)rm->value);
 		}
 	}
+	printf("done!!!\n");
 	return 0;
 }
 
@@ -122,6 +142,8 @@ int main() {
 	sht = create_tbl(hash_integer, comp_keys);
 	init_keys();
 	do_inserts();
+	test_real();
+	//return 0;
 	long ts = myclock();
 	keep_modding = 1;
 	pthread_create(&modt, NULL, modify, (void *)time(NULL));
