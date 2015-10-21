@@ -146,7 +146,7 @@ int main() {
 	//return 0;
 	long ts = myclock();
 	keep_modding = 1;
-	pthread_create(&modt, NULL, modify, (void *)time(NULL));
+//	pthread_create(&modt, NULL, modify, (void *)time(NULL));
 	for (size_t i = 0; i < nthread; i++) {
 		pthread_create(&threads[i], NULL, read_table, (void *)i);
 	}
@@ -156,7 +156,7 @@ int main() {
 	printf("\n\nJoining stuff\n");
 	ts = myclock() - ts;
 	keep_modding = 0;
-	pthread_join(modt, NULL);
+//	pthread_join(modt, NULL);
 	uint64_t total_nanos = ts * 1000;
 	double seconds = total_nanos * (1.0/1e9);
 
