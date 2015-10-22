@@ -46,11 +46,19 @@ typedef enum message_type {
 	remove_item
 } message_type;
 
+typedef enum message_mode {
+	nonblocking,
+	catch_up,
+	finite,
+	infinite
+} message_mode;
+
 typedef struct message {
 	const void *key;
 	void *data;
 	struct message *next;
 	struct message_queue *fromwhich;
+	size_t timestamp;
 	message_type mtype;
 } message;
 
@@ -107,9 +115,15 @@ typedef struct shared_hash_table {
 
 	message *mhead;
 
-    buffer wdata;
+    buffer tdata;
 
     message *mtail;
+
+    buffer ts;
+
+    size_t timestamp;
+
+    buffer hash_data;
 	struct hash_table *current_table;
 	struct hash_table *old_tables;
 	size_t nhazards;
@@ -173,7 +187,7 @@ static void init_queue(message_queue *q) {
 	atomic_barrier(mem_release);
 }
 
-static void del_queue(message_queue *q) {
+static void del_queue_mess(message_queue *q) {
 	message *ctail;
 	while ((ctail = get_from_queue(&q->tail))) {
 		free(ctail);
@@ -183,9 +197,15 @@ static void del_queue(message_queue *q) {
 static void rm_q_ref(message_queue *q) {
 	//means that we are the last visitor with the one and all!
 	if (atomic_fetch_sub(q->num_refs, 1, mem_release) == 1) {
-		del_queue(q);
+		del_queue_mess(q);
 		free(q);
 	}
+}
+
+static void *kill_q_at_thread_exit(void * par) {
+	rm_q_ref((message_queue *)par);
+	return 0;
+
 }
 
 static message *get_message() {
@@ -210,7 +230,12 @@ static void return_message(message *mess) {
 			if (mess->fromwhich->num_held < mcache_size) {
 				put_to_queue(&mess->fromwhich->head, mess);
 				atomic_fetch_add(mess->fromwhich->num_held, 1, mem_relaxed);
+				rm_q_ref(mess->fromwhich);
 			}
+			else {
+				rm_q_ref(mess->fromwhich);
+				free(mess);
+			}	
 		}
 	}
 	else {
@@ -273,9 +298,12 @@ shared_hash_table *create_tbl(hashfn_type hashfn, compfn_type compfn) {
 
 static char acquire_write(shared_hash_table *sht) {
 	if (sht->access == 0) {
-		return atomic_exchange(sht->access, 1, mem_acquire);
+		if (!atomic_exchange(sht->access, 1, mem_acquire)) {
+			sht->timestamp++;
+			return 1;
+		}
 	}
-	return 1;
+	return 0;
 }
 
 static void release_write(shared_hash_table *sht) {
